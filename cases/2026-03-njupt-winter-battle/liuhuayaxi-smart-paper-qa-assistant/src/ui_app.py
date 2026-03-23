@@ -1699,7 +1699,7 @@ def build_app(config: AppConfig):
         )
         return (
             "<style>"
-            "@keyframes codex-progress-slide {"
+            "@keyframes app-progress-slide {"
             "0% { transform: translateX(-70%); }"
             "50% { transform: translateX(80%); }"
             "100% { transform: translateX(220%); }"
@@ -1710,7 +1710,7 @@ def build_app(config: AppConfig):
             f"{detail_html}"
             "<div style='margin-top:10px;height:8px;border-radius:999px;background:#e5e7eb;overflow:hidden;'>"
             "<div style='width:45%;height:100%;border-radius:999px;background:#2563eb;"
-            "animation:codex-progress-slide 1.2s ease-in-out infinite;'></div>"
+            "animation:app-progress-slide 1.2s ease-in-out infinite;'></div>"
             "</div>"
             "</div>"
         )
@@ -3702,7 +3702,7 @@ def _build_recovery_app(widgets, config: AppConfig):
         )
         return (
             "<style>"
-            "@keyframes codex-progress-slide {"
+            "@keyframes app-progress-slide {"
             "0% { transform: translateX(-70%); }"
             "50% { transform: translateX(80%); }"
             "100% { transform: translateX(220%); }"
@@ -3713,7 +3713,7 @@ def _build_recovery_app(widgets, config: AppConfig):
             f"{detail_html}"
             "<div style='margin-top:10px;height:8px;border-radius:999px;background:#e5e7eb;overflow:hidden;'>"
             "<div style='width:45%;height:100%;border-radius:999px;background:#2563eb;"
-            "animation:codex-progress-slide 1.2s ease-in-out infinite;'></div>"
+            "animation:app-progress-slide 1.2s ease-in-out infinite;'></div>"
             "</div>"
             "</div>"
         )
@@ -3876,7 +3876,7 @@ def _render_markdown_html(markdown_text: str) -> str:
     rendered = re.sub(
         r'(?<!id=["\'])\[(\d{1,3})\]',
         lambda m: (
-            f'<a href="#codex-ref-{m.group(1)}" '
+            f'<a href="#report-ref-{m.group(1)}" '
             f'style="color:#2563eb;text-decoration:none;font-weight:600;cursor:pointer;" '
             f'title="跳转到引用 [{m.group(1)}]">[{m.group(1)}]</a>'
         ),
@@ -3885,13 +3885,13 @@ def _render_markdown_html(markdown_text: str) -> str:
     # Add id anchors to reference list items like "[1] ..."
     rendered = re.sub(
         r'(<li>)\s*\[(\d{1,3})\]',
-        lambda m: f'{m.group(1)}<span id="codex-ref-{m.group(2)}"></span>[{m.group(2)}]',
+        lambda m: f'{m.group(1)}<span id="report-ref-{m.group(2)}"></span>[{m.group(2)}]',
         rendered,
     )
     # Also match paragraphs or lines starting with [N] in reference sections
     rendered = re.sub(
         r'(<p>)\s*\[(\d{1,3})\]',
-        lambda m: f'{m.group(1)}<span id="codex-ref-{m.group(2)}"></span>[{m.group(2)}]',
+        lambda m: f'{m.group(1)}<span id="report-ref-{m.group(2)}"></span>[{m.group(2)}]',
         rendered,
     )
     # Wrap reference/citation sections in collapsible <details> blocks.
@@ -3914,19 +3914,19 @@ def _render_markdown_html(markdown_text: str) -> str:
         )
     return (
         "<style>"
-        ".codex-markdown-body{line-height:1.8;color:#111827;font-size:14px;}"
-        ".codex-markdown-body h1,.codex-markdown-body h2,.codex-markdown-body h3,.codex-markdown-body h4{margin:16px 0 8px;}"
-        ".codex-markdown-body p,.codex-markdown-body ul,.codex-markdown-body ol{margin:8px 0;}"
-        ".codex-markdown-body pre{overflow:auto;padding:12px;border-radius:8px;background:#f6f8fa;}"
-        ".codex-markdown-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
-        ".codex-markdown-body table{width:100%;border-collapse:collapse;margin:12px 0;}"
-        ".codex-markdown-body th,.codex-markdown-body td{border:1px solid #d0d7de;padding:8px 10px;vertical-align:top;text-align:left;}"
-        ".codex-markdown-body th{background:#f6f8fa;}"
-        ".codex-markdown-body blockquote{margin:12px 0;padding:8px 12px;border-left:4px solid #d0d7de;background:#f9fafb;color:#4b5563;}"
-        ".codex-markdown-body a{color:#2563eb;text-decoration:none;}"
-        ".codex-markdown-body a:hover{text-decoration:underline;}"
+        ".report-markdown-body{line-height:1.8;color:#111827;font-size:14px;}"
+        ".report-markdown-body h1,.report-markdown-body h2,.report-markdown-body h3,.report-markdown-body h4{margin:16px 0 8px;}"
+        ".report-markdown-body p,.report-markdown-body ul,.report-markdown-body ol{margin:8px 0;}"
+        ".report-markdown-body pre{overflow:auto;padding:12px;border-radius:8px;background:#f6f8fa;}"
+        ".report-markdown-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
+        ".report-markdown-body table{width:100%;border-collapse:collapse;margin:12px 0;}"
+        ".report-markdown-body th,.report-markdown-body td{border:1px solid #d0d7de;padding:8px 10px;vertical-align:top;text-align:left;}"
+        ".report-markdown-body th{background:#f6f8fa;}"
+        ".report-markdown-body blockquote{margin:12px 0;padding:8px 12px;border-left:4px solid #d0d7de;background:#f9fafb;color:#4b5563;}"
+        ".report-markdown-body a{color:#2563eb;text-decoration:none;}"
+        ".report-markdown-body a:hover{text-decoration:underline;}"
         "</style>"
-        f"<div class='codex-markdown-body'>{rendered}</div>"
+        f"<div class='report-markdown-body'>{rendered}</div>"
     )
 
 
