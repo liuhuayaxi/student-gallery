@@ -56,13 +56,13 @@
   1. **Story Input & Continuation**
       ![](./image/213617.png)
       ![](./image/214033.png)
-      2.**Consistency Check Test**
+  2. **Consistency Check Test**
       ![](./image/214226.png)
       ![](./image/214241.png)
-      3.**Structural Analysis Test**
+  3. **Structural Analysis Test**
       ![](./image/214317.png)
       ![](./image/214327.png)
-      4.**Minimal Input Generation (Opening + Short Prompt)**
+  4. **Minimal Input Generation (Opening + Short Prompt)**
       ![](./image/214625.png)
       ![](./image/214645.png)
   ## References
