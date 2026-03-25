@@ -33,7 +33,6 @@ This project is an intelligent assistant system designed for data processing and
 
 * **Prompt Engineering:** Utilized System Roles, Few-shot prompting, and Chain-of-Thought (CoT) to ensure stable formatting and complex logical deduction
 ![result](./assets/few_shot.jpg)
-![result](./assets/CoT.png)
 ***Context Window Management:** Implemented cascaded summary generation and an adaptive allocation algorithm to prevent Out-Of-Memory (OOM) errors with long texts
 ![result](./assets/single.png)
 * **API Lifecycle Management:** Designed robust error handling with a linear backoff retry strategy to mitigate server rate limits and avoid "retry storms".
@@ -47,3 +46,4 @@ This project is an intelligent assistant system designed for data processing and
 * **Multi-Document Comparative Report:** Overcomes single-text limitations; the system automatically summarizes and generates a structured deep analysis report encompassing "core themes, commonalities, and key differences" across multiple documents.
 ## References
 * **Ollama API Docs:** https://ollama.readthedocs.io/api/
+![demo](./assets/longtext.gif)
