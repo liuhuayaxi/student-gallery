@@ -41,6 +41,7 @@ from .app_utils import (
     build_cache_key,
     compress_text_for_prompt,
     estimate_token_count,
+    normalize_document_metadata_file_path,
     resolve_output_language,
     sanitize_user_question_for_prompt,
     trim_text_to_token_limit,
@@ -130,7 +131,8 @@ class VectorStoreService:
         self._local_backend = True
         self._allow_local_fallback = bool(self.config.allow_local_vector_fallback or _is_test_runtime())
         self._initialize_backend()
-        self._repair_legacy_file_paths()
+        self._repair_stored_file_metadata()
+        self._dedupe_duplicate_documents()
 
     def _maybe_restore_legacy_vector_store(self) -> None:
         """Prefer the old notebook Chroma store when the project-root store is empty."""
@@ -198,30 +200,115 @@ class VectorStoreService:
             if not self._allow_local_fallback:
                 raise RuntimeError(f"Failed to initialize Chroma vector backend: {exc}") from exc
 
-    def _repair_legacy_file_paths(self) -> None:
-        """Normalize only the local fallback paths used inside this process.
-
-        Persistent Chroma metadata is left untouched at startup. Rewriting it
-        would require deleting and re-embedding every stored chunk, which is too
-        risky during automatic recovery.
-        """
-
-        legacy_prefix = str((self.config.project_root / "notebooks" / "data" / "raw").resolve(strict=False))
-        current_prefix = str(self.config.data_root.resolve(strict=False))
-        if legacy_prefix == current_prefix:
+    def _repair_stored_file_metadata(self) -> None:
+        try:
+            if self._local_backend:
+                repaired_chunks, repaired_docs = self._repair_local_file_metadata()
+            else:
+                repaired_chunks, repaired_docs = self._repair_chroma_file_metadata()
+        except Exception as exc:
+            _append_vector_log(
+                self.config,
+                {"event": "repair_file_metadata_error", "detail": str(exc)},
+            )
             return
-        if self._local_backend:
-            self._repair_local_legacy_file_paths(legacy_prefix, current_prefix)
-        return
+        if repaired_chunks or repaired_docs:
+            _append_vector_log(
+                self.config,
+                {
+                    "event": "repair_file_metadata",
+                    "repaired_chunks": repaired_chunks,
+                    "repaired_docs": repaired_docs,
+                },
+            )
 
-    def _repair_local_legacy_file_paths(self, legacy_prefix: str, current_prefix: str) -> None:
+    def _repair_local_file_metadata(self) -> tuple[int, int]:
+        repaired_doc_ids: set[str] = set()
+        repaired_chunks = 0
         for index, document in enumerate(self._local_documents):
-            metadata = dict(document.metadata)
-            file_path = str(metadata.get("file_path", ""))
-            if legacy_prefix not in file_path:
+            metadata = normalize_document_metadata_file_path(
+                dict(document.metadata),
+                data_root=self.config.data_root,
+                refresh_signature=True,
+            )
+            if metadata == document.metadata:
                 continue
-            metadata["file_path"] = file_path.replace(legacy_prefix, current_prefix, 1)
             self._local_documents[index] = SourceDocument(page_content=document.page_content, metadata=metadata)
+            repaired_chunks += 1
+            if metadata.get("doc_id"):
+                repaired_doc_ids.add(str(metadata.get("doc_id")))
+        return repaired_chunks, len(repaired_doc_ids)
+
+    def _repair_chroma_file_metadata(self) -> tuple[int, int]:
+        payload = self._backend.get(include=["metadatas"])
+        ids = payload.get("ids", [])
+        metadatas = payload.get("metadatas", [])
+        updated_ids: list[str] = []
+        updated_metadatas: list[dict[str, object]] = []
+        repaired_doc_ids: set[str] = set()
+        for chunk_id, metadata in zip(ids, metadatas):
+            if not isinstance(metadata, dict):
+                continue
+            normalized = normalize_document_metadata_file_path(
+                dict(metadata),
+                data_root=self.config.data_root,
+                refresh_signature=True,
+            )
+            if normalized == metadata:
+                continue
+            updated_ids.append(chunk_id)
+            updated_metadatas.append(normalized)
+            if normalized.get("doc_id"):
+                repaired_doc_ids.add(str(normalized.get("doc_id")))
+        if updated_ids:
+            self._backend._collection.update(ids=updated_ids, metadatas=updated_metadatas)
+        return len(updated_ids), len(repaired_doc_ids)
+
+    def _dedupe_duplicate_documents(self) -> None:
+        try:
+            removed_count = (
+                self._dedupe_local_duplicate_documents()
+                if self._local_backend
+                else self._dedupe_chroma_duplicate_documents()
+            )
+        except Exception as exc:
+            _append_vector_log(
+                self.config,
+                {"event": "dedupe_duplicate_documents_error", "detail": str(exc)},
+            )
+            return
+        if removed_count:
+            _append_vector_log(
+                self.config,
+                {"event": "dedupe_duplicate_documents", "removed_docs": removed_count},
+            )
+
+    def _dedupe_local_duplicate_documents(self) -> int:
+        duplicates = _collect_duplicate_doc_ids(doc.metadata for doc in self._local_documents)
+        if not duplicates:
+            return 0
+        duplicate_doc_ids = {doc_id for _, doc_id in duplicates}
+        self._local_documents = [
+            doc
+            for doc in self._local_documents
+            if str(doc.metadata.get("doc_id", "")) not in duplicate_doc_ids
+        ]
+        return len(duplicate_doc_ids)
+
+    def _dedupe_chroma_duplicate_documents(self) -> int:
+        payload = self._backend.get(include=["metadatas"])
+        duplicates = _collect_duplicate_doc_ids(payload.get("metadatas", []))
+        if not duplicates:
+            return 0
+        by_course: dict[str, list[str]] = {}
+        for course_id, doc_id in duplicates:
+            by_course.setdefault(course_id, []).append(doc_id)
+        removed = 0
+        for course_id, doc_ids in by_course.items():
+            unique_doc_ids = list(dict.fromkeys(doc_ids))
+            self._chroma_delete_documents(course_id, unique_doc_ids)
+            removed += len(unique_doc_ids)
+        return removed
 
     @property
     def backend_mode(self) -> str:
@@ -1039,6 +1126,37 @@ def _record_from_metadata(metadata: dict, chunk_count: int) -> DocumentRecord:
         chunk_count=chunk_count,
         is_vectorized=True,
     )
+
+
+def _document_identity_key(metadata: dict[str, object]) -> tuple[str, str, str] | None:
+    course_id = str(metadata.get("course_id", "")).strip()
+    source_type = str(metadata.get("source_type", "")).strip()
+    file_name = str(metadata.get("file_name", "")).strip()
+    doc_id = str(metadata.get("doc_id", "")).strip()
+    if not course_id or not source_type or not file_name or not doc_id:
+        return None
+    return course_id, source_type, file_name
+
+
+def _collect_duplicate_doc_ids(metadatas: Iterable[dict[str, object]]) -> list[tuple[str, str]]:
+    grouped: dict[tuple[str, str, str], dict[str, int]] = {}
+    for metadata in metadatas:
+        if not isinstance(metadata, dict):
+            continue
+        identity = _document_identity_key(metadata)
+        if identity is None:
+            continue
+        course_id, _, _ = identity
+        doc_id = str(metadata.get("doc_id", "")).strip()
+        grouped.setdefault(identity, {})
+        grouped[identity][doc_id] = grouped[identity].get(doc_id, 0) + 1
+    duplicates: list[tuple[str, str]] = []
+    for (course_id, _, _), doc_counts in grouped.items():
+        if len(doc_counts) <= 1:
+            continue
+        keep_doc_id = max(doc_counts.items(), key=lambda item: (item[1], item[0]))[0]
+        duplicates.extend((course_id, doc_id) for doc_id in doc_counts if doc_id != keep_doc_id)
+    return duplicates
 
 
 @dataclass(slots=True)
