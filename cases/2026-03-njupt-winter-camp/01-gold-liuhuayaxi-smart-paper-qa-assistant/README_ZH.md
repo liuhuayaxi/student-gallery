@@ -24,23 +24,33 @@
 1. 在 aup-learning-cloud 中选择 **Basic GPU Environment**，Git URL 填写本案例仓库地址。
 2. 进入 `cases/2026-03-njupt-winter-camp/01-gold-liuhuayaxi-smart-paper-qa-assistant/`。
 3. 打开 `main_zh.ipynb` 或 `main.ipynb`。
-4. 首次运行时，如果 `config/app_config.json` 不存在，系统会自动根据 `config/app_config.example.json` 生成默认配置。
-5. 在配置文件中填写聊天模型、嵌入模型以及对应的 OpenAI-compatible Base URL；如果聊天模型和嵌入模型共享同一服务，可复用同一个服务地址。
-6. 从头到尾运行 Notebook 所有单元，等待界面加载完成。
-7. 通过界面创建知识库、导入论文文件，再执行问答、单文分析或批量对比。
+4. 仓库已经内置 `config/app_config.json`、1 个预构建知识库 `论文`、5 篇演示 PDF 和 5 组保留对话，无需再恢复备份。
+5. 从头到尾运行 Notebook 所有单元，等待界面加载完成。
+6. 如果你的 Ollama 服务地址不是 `http://open-webui-ollama.open-webui:11434`，请修改 `config/app_config.json` 或 `config/app_config.example.json`。仓库默认写入的是该服务的 OpenAI-compatible `/v1` 路径。
+7. 界面加载完成后即可直接演示问答、单文分析和批量对比；当前仓库只保留最小演示数据集，方便拉取后快速启动。
 
-一个典型配置示意如下：
+仓库默认附带的 Ollama 配置如下：
 
 ```json
 {
-  "OPENAI_CHAT_API_KEY": "your-api-key",
-  "OPENAI_CHAT_BASE_URL": "http://your-compatible-endpoint/v1",
-  "OPENAI_CHAT_MODEL": "your-chat-model",
-  "OPENAI_EMBEDDING_API_KEY": "your-api-key",
-  "OPENAI_EMBEDDING_BASE_URL": "http://your-compatible-endpoint/v1",
-  "OPENAI_EMBEDDING_MODEL": "your-embedding-model"
+  "OPENAI_API_KEY": "ollama",
+  "OPENAI_BASE_URL": "http://open-webui-ollama.open-webui:11434/v1",
+  "OPENAI_CHAT_MODEL": "qwen3-coder:30b",
+  "OPENAI_EMBEDDING_MODEL": "MadMind/Qwen3-Embedding-8B-GGUF-Q4_K_M:latest"
 }
 ```
+
+## 内置演示数据
+
+- 预构建知识库：`论文`
+- 内置 5 篇 PDF：
+  `An Integrated Plasma–Photocatalytic System for Upcyclingof Polyolefin Plastics.pdf`
+  `Angew Chem Int Ed - 2024 - Yue - Selective Photoreforming of Waste Plastics into Diesel Olefins via Single Reactive Oxygen.pdf`
+  `A direct polymeric carbon nitride:tungsten oxide Z-scheme heterostructure for efficient photocatalytic hydrogen generation via reforming of plastics into value-added chemicals .pdf`
+  `Ambient solar thermal catalysis for polyolefin upcycling using copper encapsulated in silicon nanosheets and chloroaluminate ion.pdf`
+  `Advanced Energy Materials - 2024 - Zhao - Solar-Driven Photoelectrochemical Upcycling of Polyimide Plastic Waste with Safe.pdf`
+- `storage/app_state.db` 中保留了 5 组不同长度的持久化对话，轮次数分别为 14、20、40、76、98。
+- `storage/chroma` 已经提前写入上述 5 篇 PDF 的向量索引，Notebook 首次启动后即可直接检索问答。
 
 ## 技术亮点
 
@@ -52,6 +62,8 @@
 ## 结果 / 演示
 
 根据作品说明书中的阶段性统计，截至该版本项目已实现并验证了如下结果：
+
+下面这些统计数字对应的是项目完整版阶段成果；当前仓库为了方便演示，刻意裁成了上面的最小演示数据集，便于快速克隆和启动。
 
 - 已接入 66 份原始文档。
 - 已维护 2 个知识库。
