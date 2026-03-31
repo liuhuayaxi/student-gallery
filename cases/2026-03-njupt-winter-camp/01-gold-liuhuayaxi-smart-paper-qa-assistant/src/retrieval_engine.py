@@ -41,9 +41,11 @@ from .app_utils import (
     build_cache_key,
     compress_text_for_prompt,
     estimate_token_count,
+    load_json_mapping,
     normalize_document_metadata_file_path,
     resolve_output_language,
     sanitize_user_question_for_prompt,
+    source_type_folder_name,
     trim_text_to_token_limit,
     validate_user_text,
 )
@@ -128,11 +130,150 @@ class VectorStoreService:
         self._maybe_restore_legacy_vector_store()
         self._backend = None
         self._local_documents: list[SourceDocument] = []
+        self._local_loaded_scopes: set[tuple[str, str]] = set()
+        self._demo_course_id, self._demo_doc_ids_by_name = self._load_demo_doc_id_map()
         self._local_backend = True
         self._allow_local_fallback = bool(self.config.allow_local_vector_fallback or _is_test_runtime())
         self._initialize_backend()
         self._repair_stored_file_metadata()
         self._dedupe_duplicate_documents()
+
+    def _load_demo_doc_id_map(self) -> tuple[str, dict[str, str]]:
+        manifest = load_json_mapping(self.config.project_root / "storage" / "demo_manifest.json")
+        course_id = str(manifest.get("knowledge_base", "")).strip()
+        file_names = [str(item).strip() for item in manifest.get("documents", []) if str(item).strip()]
+        doc_ids = [str(item).strip() for item in manifest.get("document_doc_ids", []) if str(item).strip()]
+        return course_id, {
+            file_name: doc_id
+            for file_name, doc_id in zip(file_names, doc_ids)
+            if file_name and doc_id
+        }
+
+    def _discover_local_course_ids(self) -> list[str]:
+        if not self.config.data_root.exists():
+            return []
+        return sorted(
+            path.name
+            for path in self.config.data_root.iterdir()
+            if path.is_dir()
+        )
+
+    def _iter_local_source_files(self, course_id: str, source_type: str) -> list[Path]:
+        folder = self.config.data_root / course_id / source_type_folder_name(source_type)
+        if not folder.exists():
+            return []
+        return sorted(
+            path
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower().lstrip(".") in {"pdf", "md", "txt", "docx"}
+        )
+
+    def _stable_local_doc_id(self, course_id: str, source_type: str, file_path: Path) -> str:
+        if course_id == self._demo_course_id:
+            demo_doc_id = self._demo_doc_ids_by_name.get(file_path.name)
+            if demo_doc_id:
+                return demo_doc_id
+        return f"doc_{build_cache_key('local_doc', course_id, source_type, str(file_path.resolve(strict=False)))[:12]}"
+
+    def _normalize_local_chunks(self, chunks: list[SourceDocument]) -> list[SourceDocument]:
+        normalized_chunks: list[SourceDocument] = []
+        for chunk in chunks:
+            metadata = normalize_document_metadata_file_path(
+                dict(chunk.metadata),
+                data_root=self.config.data_root,
+                refresh_signature=True,
+            )
+            chunk_key = build_cache_key(
+                metadata.get("doc_id", ""),
+                metadata.get("chunk_index", 0),
+                metadata.get("page_label", ""),
+                metadata.get("section_label", ""),
+                chunk.page_content,
+            )
+            metadata["chunk_id"] = f"chunk_{chunk_key[:12]}"
+            normalized_chunks.append(SourceDocument(page_content=chunk.page_content, metadata=metadata))
+        return normalized_chunks
+
+    def _load_local_scope_documents(self, course_id: str, source_type: str) -> list[SourceDocument]:
+        from .knowledge_ingestion import _load_single_file, split_documents
+
+        file_paths = self._iter_local_source_files(course_id, source_type)
+        if not file_paths:
+            return []
+        raw_documents: list[SourceDocument] = []
+        for file_path in file_paths:
+            stable_doc_id = self._stable_local_doc_id(course_id, source_type, file_path)
+            loaded = _load_single_file(course_id, file_path, source_type)
+            for document in loaded:
+                metadata = dict(document.metadata)
+                metadata["doc_id"] = stable_doc_id
+                metadata["file_name"] = file_path.name
+                metadata["file_path"] = str(file_path.resolve(strict=False))
+                metadata["source_type"] = source_type
+                raw_documents.append(SourceDocument(page_content=document.page_content, metadata=metadata))
+        chunks = split_documents(
+            raw_documents,
+            chunk_size=self.config.chunk_size,
+            chunk_overlap=self.config.chunk_overlap,
+            merge_small_chunks=self.config.merge_small_chunks,
+            min_chunk_size=self.config.min_chunk_size,
+        )
+        return self._normalize_local_chunks(chunks)
+
+    def _ensure_local_documents_loaded(
+        self,
+        course_id: str,
+        source_types: list[str] | None = None,
+    ) -> int:
+        normalized_course_id = str(course_id or "").strip()
+        if not normalized_course_id:
+            return 0
+        target_types = [
+            source_type
+            for source_type in (source_types or ["lecture", "assignment", "paper"])
+            if source_type in {"lecture", "assignment", "paper"}
+        ]
+        loaded_chunks = 0
+        for source_type in target_types:
+            scope = (normalized_course_id, source_type)
+            if scope in self._local_loaded_scopes:
+                continue
+            self._local_documents = [
+                doc
+                for doc in self._local_documents
+                if not (
+                    str(doc.metadata.get("course_id", "")) == normalized_course_id
+                    and str(doc.metadata.get("source_type", "")) == source_type
+                )
+            ]
+            chunks = self._load_local_scope_documents(normalized_course_id, source_type)
+            if chunks:
+                self._local_upsert(chunks)
+                loaded_chunks += len(chunks)
+            self._local_loaded_scopes.add(scope)
+        return loaded_chunks
+
+    def _activate_local_fallback(
+        self,
+        *,
+        course_id: str = "",
+        source_types: list[str] | None = None,
+        detail: str = "",
+    ) -> int:
+        self._backend = None
+        self._local_backend = True
+        loaded_chunks = self._ensure_local_documents_loaded(course_id, source_types)
+        _append_vector_log(
+            self.config,
+            {
+                "event": "local_fallback_activated",
+                "course_id": course_id,
+                "source_types": source_types or [],
+                "loaded_chunks": loaded_chunks,
+                "detail": detail,
+            },
+        )
+        return loaded_chunks
 
     def _maybe_restore_legacy_vector_store(self) -> None:
         """Prefer the old notebook Chroma store when the project-root store is empty."""
@@ -381,6 +522,41 @@ class VectorStoreService:
                                 "detail": str(rollback_exc),
                             },
                         )
+                if self._allow_local_fallback:
+                    course_to_source_types: dict[str, set[str]] = {}
+                    for doc in docs:
+                        course_id = str(doc.metadata.get("course_id", "")).strip()
+                        source_type = str(doc.metadata.get("source_type", "")).strip()
+                        if course_id and source_type:
+                            course_to_source_types.setdefault(course_id, set()).add(source_type)
+                    self._backend = None
+                    self._local_backend = True
+                    loaded_locally = 0
+                    for course_id, source_type_set in course_to_source_types.items():
+                        for source_type in source_type_set:
+                            self._local_loaded_scopes.discard((course_id, source_type))
+                        loaded_locally += self._ensure_local_documents_loaded(
+                            course_id,
+                            sorted(source_type_set),
+                        )
+                    if loaded_locally <= 0:
+                        self._local_upsert(docs)
+                        loaded_locally = len(docs)
+                    if progress_callback is not None:
+                        await _emit_vector_progress(
+                            progress_callback,
+                            "当前 embedding 模型不可用，已自动切换到本地关键词检索模式，并保留切片供问答与分析使用。",
+                        )
+                    _append_vector_log(
+                        self.config,
+                        {
+                            "event": "upsert_fallback_to_local",
+                            "detail": str(exc),
+                            "stored_locally": loaded_locally,
+                            "course_ids": sorted(course_to_source_types),
+                        },
+                    )
+                    return loaded_locally
                 _append_vector_log(
                     self.config,
                     {
@@ -499,6 +675,7 @@ class VectorStoreService:
         if self._local_backend:
             if not self._allow_local_fallback:
                 raise RuntimeError("Vector store is unavailable. Recall cannot continue.")
+            await asyncio.to_thread(self._ensure_local_documents_loaded, course_id, source_types)
             return self._local_recall_documents(
                 course_id,
                 query,
@@ -519,8 +696,12 @@ class VectorStoreService:
         except Exception as exc:
             _append_vector_log(self.config, {"event": "recall_error", "detail": str(exc), "course_id": course_id})
             if self._allow_local_fallback:
-                self._backend = None
-                self._local_backend = True
+                await asyncio.to_thread(
+                    self._activate_local_fallback,
+                    course_id=course_id,
+                    source_types=source_types,
+                    detail=str(exc),
+                )
                 return self._local_recall_documents(
                     course_id,
                     query,
@@ -713,24 +894,32 @@ class VectorStoreService:
         if self._local_backend:
             if not self._allow_local_fallback:
                 raise RuntimeError("Vector store is unavailable. Chunk inspection cannot continue.")
+            await asyncio.to_thread(self._ensure_local_documents_loaded, course_id, None)
             return [
                 doc
                 for doc in self._local_documents
                 if doc.metadata.get("course_id") == course_id and doc.metadata.get("doc_id") == doc_id
             ]
         try:
-            return await asyncio.to_thread(self._chroma_get_document_chunks, course_id, doc_id)
+            chunks = await asyncio.to_thread(self._chroma_get_document_chunks, course_id, doc_id)
         except Exception as exc:
             _append_vector_log(self.config, {"event": "get_document_chunks_error", "detail": str(exc), "course_id": course_id, "doc_id": doc_id})
             if self._allow_local_fallback:
-                self._backend = None
-                self._local_backend = True
+                await asyncio.to_thread(self._activate_local_fallback, course_id=course_id, detail=str(exc))
                 return [
                     doc
                     for doc in self._local_documents
                     if doc.metadata.get("course_id") == course_id and doc.metadata.get("doc_id") == doc_id
                 ]
             raise
+        if chunks or not self._allow_local_fallback:
+            return chunks
+        await asyncio.to_thread(self._ensure_local_documents_loaded, course_id, None)
+        return [
+            doc
+            for doc in self._local_documents
+            if doc.metadata.get("course_id") == course_id and doc.metadata.get("doc_id") == doc_id
+        ]
 
     async def delete_documents(self, course_id: str, doc_ids: list[str]) -> int:
         if self._local_backend:
@@ -796,43 +985,55 @@ class VectorStoreService:
         if self._local_backend:
             if not self._allow_local_fallback:
                 raise RuntimeError("Vector store is unavailable. Document list cannot continue.")
+            await asyncio.to_thread(self._ensure_local_documents_loaded, course_id, None)
             return _dedupe_records(
                 doc.metadata
                 for doc in self._local_documents
                 if doc.metadata.get("course_id") == course_id
             )
         try:
-            return await asyncio.to_thread(self._chroma_list_documents, course_id)
+            records = await asyncio.to_thread(self._chroma_list_documents, course_id)
         except Exception as exc:
             _append_vector_log(self.config, {"event": "list_documents_error", "detail": str(exc), "course_id": course_id})
             if self._allow_local_fallback:
-                self._backend = None
-                self._local_backend = True
+                await asyncio.to_thread(self._activate_local_fallback, course_id=course_id, detail=str(exc))
                 return _dedupe_records(
                     doc.metadata
                     for doc in self._local_documents
                     if doc.metadata.get("course_id") == course_id
                 )
             raise
+        if records or not self._allow_local_fallback:
+            return records
+        await asyncio.to_thread(self._ensure_local_documents_loaded, course_id, None)
+        return _dedupe_records(
+            doc.metadata
+            for doc in self._local_documents
+            if doc.metadata.get("course_id") == course_id
+        )
 
     async def list_course_ids(self) -> list[str]:
         if self._local_backend:
             if not self._allow_local_fallback:
                 raise RuntimeError("Vector store is unavailable. Knowledge-base list cannot continue.")
-            return sorted(
+            local_course_ids = sorted(
                 {str(doc.metadata.get("course_id", "")) for doc in self._local_documents if doc.metadata.get("course_id")}
             )
+            return local_course_ids or self._discover_local_course_ids()
         try:
-            return await asyncio.to_thread(self._chroma_list_course_ids)
+            course_ids = await asyncio.to_thread(self._chroma_list_course_ids)
         except Exception as exc:
             _append_vector_log(self.config, {"event": "list_course_ids_error", "detail": str(exc)})
             if self._allow_local_fallback:
-                self._backend = None
-                self._local_backend = True
-                return sorted(
+                await asyncio.to_thread(self._activate_local_fallback, detail=str(exc))
+                local_course_ids = sorted(
                     {str(doc.metadata.get("course_id", "")) for doc in self._local_documents if doc.metadata.get("course_id")}
                 )
+                return local_course_ids or self._discover_local_course_ids()
             raise
+        if course_ids or not self._allow_local_fallback:
+            return course_ids
+        return self._discover_local_course_ids()
 
     def _chroma_list_documents(self, course_id: str) -> list[DocumentRecord]:
         payload = self._backend.get(
@@ -858,17 +1059,22 @@ class VectorStoreService:
             self._local_documents = [
                 doc for doc in self._local_documents if doc.metadata.get("course_id") != course_id
             ]
+            self._local_loaded_scopes = {
+                scope for scope in self._local_loaded_scopes if scope[0] != course_id
+            }
             return
         try:
             await asyncio.to_thread(self._chroma_reset_course, course_id)
         except Exception as exc:
             _append_vector_log(self.config, {"event": "reset_course_error", "detail": str(exc), "course_id": course_id})
             if self._allow_local_fallback:
-                self._backend = None
-                self._local_backend = True
+                self._activate_local_fallback(course_id=course_id, detail=str(exc))
                 self._local_documents = [
                     doc for doc in self._local_documents if doc.metadata.get("course_id") != course_id
                 ]
+                self._local_loaded_scopes = {
+                    scope for scope in self._local_loaded_scopes if scope[0] != course_id
+                }
                 return
             raise
 
